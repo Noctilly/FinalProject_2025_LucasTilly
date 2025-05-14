@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 
 
-def compute_averages(df: pd.Dataframe):
+def compute_averages(df: pd.DataFrame):
     # Copy Dataframe and fix time format
     data_avg_per_user = df.copy()
     data_avg_per_user["time"] = pd.to_datetime(data_avg_per_user["time"])
