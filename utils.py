@@ -5,10 +5,9 @@ import numpy as np
 def compute_averages(df: pd.DataFrame):
     # Copy Dataframe and fix time format
     data_avg_per_user = df.copy()
-    data_avg_per_user["time"] = pd.to_datetime(data_avg_per_user["time"])
 
     # Get hour from time column
-    data_avg_per_user["hour"] = data_avg_per_user["time"].dt.hour
+    # data_avg_per_user["hour"] = data_avg_per_user["time"].dt.hour
 
     # Compute averages of all numeric values for each user
     data_avg_per_user = (
@@ -20,7 +19,10 @@ def compute_averages(df: pd.DataFrame):
 
     # Rename columns for clarity
     data_avg_per_user = data_avg_per_user.rename(
-        columns={"watch_ratio": "watch_ratio_mean", "video_length": "video_length_mean"}
+        columns={
+            "watch_ratio": "user_watch_ratio_mean",
+            "video_length": "user_video_length_mean",
+        }
     )
 
     return data_avg_per_user
@@ -30,8 +32,9 @@ def merge_matrix_avgs_friend_list(
     matrix: pd.DataFrame, averages: pd.DataFrame, friend_lists: pd.DataFrame
 ):
     # Copy useful columns from Dataframe and fix time format
-    merged = matrix[["user_id", "video_id", "watch_ratio", "video_length", "time"]]
-    merged["time"] = pd.to_datetime(merged["time"])
+    merged = matrix[
+        ["user_id", "video_id", "watch_ratio", "like", "video_length", "time"]
+    ].copy()
 
     # Merge previously calculated averages
     merged = merged.merge(averages, on="user_id", how="left")
@@ -47,74 +50,79 @@ def merge_matrix_avgs_friend_list(
     return merged
 
 
-def get_friends_data(df: pd.DataFrame):
-    # Copy Dataframe
-    df_with_friends_data = df.copy()
-
-    # Sort Dataframe by time
-    df_with_friends_data = df_with_friends_data.sort_values("time").reset_index(
-        drop=True
-    )
-
-    # Compute prior video mean for each video (exclude current row using shift)
-    df_with_friends_data["video_watch_ratio_prior_mean"] = df_with_friends_data.groupby(
-        "video_id"
-    )["watch_ratio"].transform(  # For each video's watch_ratios
-        lambda x: x.shift().expanding().mean()
-    )  # Shift rows to exclude current one, and then perform the mean of every watch_ratio before the current one
-
-    return df_with_friends_data
-
-
-def get_friends_watch_ratio(df: pd.DataFrame):
-    df_with_friends_data = get_friends_data(df)
+def get_friends_watch_ratio(df: pd.DataFrame, video_features: pd.DataFrame):
+    # df_with_friends_data = get_friends_data(df)
 
     # Explode friends to work with numbers instead of lists and rename column
-    df_exploded = df_with_friends_data.explode("friend_list").rename(
-        columns={"friend_list": "friend_id"}
-    )
+    df_exploded = df.explode("friend_list").rename(columns={"friend_list": "friend_id"})
 
     # Copy main previously calculated features and rename columns
-    friend_history = df_with_friends_data[
-        ["user_id", "video_id", "time", "watch_ratio"]
-    ].copy()
+    friend_history = df[["user_id", "video_id", "watch_ratio"]].copy()
     friend_history.columns = [
         "friend_id",
         "video_id",
-        "friend_time",
         "friend_watch_ratio",
     ]
 
     # Merge friends data
     merged = df_exploded.merge(friend_history, on=["friend_id", "video_id"], how="left")
     # Filter only prior data
-    merged = merged[merged["friend_time"] < merged["time"]]
+    # merged = merged[merged["friend_time"] < merged["time"]]
 
     # Compute friend's watch ratio mean for each interaction
     friend_means = (
-        merged.groupby(["user_id", "video_id", "time"])["friend_watch_ratio"]
+        merged.groupby(["user_id", "video_id"])["friend_watch_ratio"]
         .mean()
         .reset_index()
-        .rename(columns={"friend_watch_ratio": "friend_watch_ratio_prior_mean"})
+        .rename(columns={"friend_watch_ratio": "friend_watch_ratio_mean"})
     )
 
     # Merge back friend means and fill missing values with video means if possible
-    final_data = df_with_friends_data.merge(
-        friend_means, on=["user_id", "video_id", "time"], how="left"
-    )
-    final_data["watch_ratio_prior_mean"] = (
-        final_data["friend_watch_ratio_prior_mean"]
-        .fillna(final_data["video_watch_ratio_prior_mean"])
-        .fillna(0)
-    )
+    final_data = df.merge(friend_means, on=["user_id", "video_id"], how="left")
+    final_data["friend_watch_ratio_mean"] = final_data[
+        "friend_watch_ratio_mean"
+    ]  # .fillna(video_features["average_watch_ratio"].mean())
 
     # Drop temporary columns
     final_data = final_data.drop(
         columns=[
-            "friend_watch_ratio_prior_mean",
-            "video_watch_ratio_prior_mean",
             "friend_list",
         ]
     )
 
     return final_data
+
+
+def get_video_feat_category_avg_per_user(
+    matrix: pd.DataFrame,
+    avg_user_feat: pd.DataFrame,
+    avg_user_category: pd.DataFrame,
+    video_feat: pd.DataFrame,
+    video_category: pd.DataFrame,
+):
+    user_video_info = matrix[["user_id", "video_id"]].copy()
+
+    # Handle feat
+    user_video_info = user_video_info.merge(video_feat, on="video_id", how="left")
+    user_video_info = user_video_info.explode("feat")
+    user_video_info = user_video_info.merge(
+        avg_user_feat, on=["user_id", "feat"], how="left"
+    )
+    user_video_info = user_video_info.drop(columns="feat")
+
+    # For each (user, video) couple, compute the average of the user's watch ratios on this video's tags
+    user_video_info["user_feat_watch_ratio_mean"] = user_video_info.groupby(
+        ["user_id", "video_id"]
+    )["user_feat_watch_ratio_mean"].transform("mean")
+
+    user_video_info = user_video_info.drop_duplicates()
+
+    # Handle category
+    user_video_info = user_video_info.merge(video_category, on="video_id", how="left")
+    user_video_info = user_video_info.merge(
+        avg_user_category, on=["user_id", "first_level_category_id"], how="left"
+    )
+    user_video_info = user_video_info.drop(columns="first_level_category_id")
+
+    # user_id, video_id, user_feat_watch_ratio_mean, user_category_watch_ratio_mean
+    return user_video_info
